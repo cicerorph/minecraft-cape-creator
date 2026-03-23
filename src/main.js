@@ -1,257 +1,330 @@
 /**
- * MinecraftCapeCreator - with animated GIF support
- * Uses gifuct-js to decode GIF frames and animates them on the cape canvas.
+ * MinecraftCapeCreator
+ * - GIF decode:  omggif  (GifReader)
+ * - GIF export:  gif.js  (GIF constructor)
+ * - ZIP export:  JSZip
  */
 
 class MinecraftCapeCreator {
     constructor() {
         this.canvas = document.createElement('canvas')
-        this.context = this.canvas.getContext('2d', { willReadFrequently: true });
+        this.context = this.canvas.getContext('2d', { willReadFrequently: true })
 
         this.AUTO_COLOR = "auto"
         this.color = this.AUTO_COLOR
-        this.scale = 1;
-        this.elytraImage = true;
+        this.scale = 1
+        this.elytraImage = true
 
         // GIF animation state
-        this._gifFrames = null;        // decoded frames array (null if not a GIF)
-        this._gifFrameIndex = 0;
-        this._gifAnimTimer = null;
-        this._onFrameUpdate = null;    // callback called after each frame is painted
+        this._gifFrames = null
+        this._gifInfo = null
+        this._gifFrameIndex = 0
+        this._gifAnimTimer = null
+        this._onFrameUpdate = null   // (dataUrl) => void
 
-        // Raw file data (needed to re-decode GIF)
-        this._imageData = null;        // ArrayBuffer if GIF, else null
-        this._imageSrc = null;         // data URL for static images
+        // Raw source
+        this._imageSrc = null
+        this._imageArrayBuffer = null
+        this._isGif = false
+
+        // All rendered cape frames — populated by buildCape()
+        this._renderedFrames = []    // [{ dataUrl, delay }]
+
+        this.background = null
     }
 
-    // ─── Public setters ───────────────────────────────────────────────────────
+    // ─── Setters ──────────────────────────────────────────────────────────────
 
-    setColor(color) { this.color = color; }
-    setAutoColor() { this.color = this.AUTO_COLOR; }
-
+    setColor(color) { this.color = color }
+    setAutoColor() { this.color = this.AUTO_COLOR }
     setScale(scale) {
-        let newScale = Math.max(1, Math.min(scale, 6));
-        this.scale = Math.pow(2, newScale - 1);
+        this.scale = Math.pow(2, Math.max(1, Math.min(scale, 6)) - 1)
     }
+    setBackground(background) { this.background = background }
+    showOnElytra(value) { this.elytraImage = value }
+    onFrameUpdate(cb) { this._onFrameUpdate = cb }
+    get isGif() { return this._isGif }
+    get frameCount() { return this._renderedFrames ? this._renderedFrames.length : 0 }
 
-    /**
-     * Accept either a data URL (static images) or an ArrayBuffer (for GIFs
-     * when you want to pass raw bytes). The HTML side always passes a data URL,
-     * so we detect GIFs by the data-URL header.
-     */
     setImage(src) {
-        this._stopGifAnimation();
-        this._gifFrames = null;
-        this._imageData = null;
-        this._imageSrc = src;
+        this._stopGifAnimation()
+        this._gifFrames = null
+        this._gifInfo = null
+        this._imageArrayBuffer = null
+        this._imageSrc = null
+        this._isGif = false
+        this._renderedFrames = []
 
-        // Detect GIF by data-URL mime type
         if (src && src.startsWith('data:image/gif')) {
-            // Convert base64 data URL → ArrayBuffer for gifuct-js
-            const base64 = src.split(',')[1];
-            const binary = atob(base64);
-            const buf = new ArrayBuffer(binary.length);
-            const bytes = new Uint8Array(buf);
-            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-            this._imageData = buf;
+            this._isGif = true
+            const base64 = src.split(',')[1]
+            const binary = atob(base64)
+            const buf = new ArrayBuffer(binary.length)
+            const bytes = new Uint8Array(buf)
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+            this._imageArrayBuffer = buf
+        } else {
+            this._imageSrc = src
         }
     }
 
-    setBackground(background) { this.background = background; }
-
-    showOnElytra(value) { this.elytraImage = value; }
-
-    /**
-     * Register a callback that fires whenever a GIF frame is painted.
-     * The callback receives the current canvas data URL.
-     */
-    onFrameUpdate(cb) { this._onFrameUpdate = cb; }
-
-    // ─── Build / animate ──────────────────────────────────────────────────────
+    // ─── Build ────────────────────────────────────────────────────────────────
 
     buildCape() {
-        this._stopGifAnimation();
+        this._stopGifAnimation()
 
-        if (this._imageData) {
-            // It's a GIF — decode then start animation loop
-            return this._decodeGif(this._imageData).then(frames => {
-                this._gifFrames = frames;
-                this._gifFrameIndex = 0;
-                return this._renderGifFrame(frames[0]);
-            }).then(dataUrl => {
-                this._startGifAnimation();
-                return dataUrl;
-            });
+        if (this._isGif && this._imageArrayBuffer) {
+            return this._decodeGif(this._imageArrayBuffer)
+                .then(({ frames, info }) => {
+                    this._gifFrames = frames
+                    this._gifInfo = info
+                    this._gifFrameIndex = 0
+                    return this._renderAllGifFrames()
+                })
+                .then(() => {
+                    const first = this._renderedFrames[0]
+                    this._startGifAnimation()
+                    return first ? first.dataUrl : null
+                })
         } else {
-            // Static image (or no image)
-            return this._buildStaticCape(this._imageSrc);
+            this._renderedFrames = []
+            return this._buildStaticCape(this._imageSrc).then(dataUrl => {
+                this._renderedFrames = [{ dataUrl, delay: 100 }]
+                return dataUrl
+            })
         }
     }
 
-    // ─── GIF decoding & animation ─────────────────────────────────────────────
+    // ─── GIF decode via omggif ────────────────────────────────────────────────
 
-    async _decodeGif(arrayBuffer) {
-        // gifuct-js must be loaded globally (via script tag in HTML)
-        const { parseGIF, decompressFrames } = window.gifuctJs;
-        const gif = parseGIF(arrayBuffer);
-        const frames = decompressFrames(gif, true); // true = patch each frame
-        return frames;
+    _decodeGif(arrayBuffer) {
+        return new Promise((resolve, reject) => {
+            try {
+                // omggif exposes GifReader globally
+                const gr = new GifReader(new Uint8Array(arrayBuffer))
+                const info = { width: gr.width, height: gr.height }
+                const frames = []
+
+                // Rolling composite canvas for correct disposal rendering
+                const comp = document.createElement('canvas')
+                comp.width = info.width
+                comp.height = info.height
+                const compCtx = comp.getContext('2d')
+
+                let prevSnapshot = null
+
+                for (let i = 0; i < gr.numFrames(); i++) {
+                    const fi = gr.frameInfo(i)
+
+                    // Disposal of *previous* frame before drawing current
+                    if (i > 0) {
+                        const prev = frames[i - 1]
+                        if (prev.disposal === 2) {
+                            compCtx.clearRect(prev.x, prev.y, prev.fw, prev.fh)
+                        } else if (prev.disposal === 3 && prevSnapshot) {
+                            compCtx.putImageData(prevSnapshot, 0, 0)
+                        }
+                    }
+
+                    if (fi.disposal === 3) {
+                        prevSnapshot = compCtx.getImageData(0, 0, info.width, info.height)
+                    }
+
+                    // Decode RGBA pixels for this frame (full canvas size)
+                    const pixels = new Uint8ClampedArray(info.width * info.height * 4)
+                    gr.decodeAndBlitFrameRGBA(i, pixels)
+                    compCtx.putImageData(new ImageData(pixels, info.width, info.height), 0, 0)
+
+                    // Snapshot composite into its own canvas
+                    const snap = document.createElement('canvas')
+                    snap.width = info.width
+                    snap.height = info.height
+                    snap.getContext('2d').drawImage(comp, 0, 0)
+
+                    frames.push({
+                        canvas: snap,
+                        delay: (fi.delay || 10) * 10,   // centiseconds → ms
+                        x: fi.x || 0,
+                        y: fi.y || 0,
+                        fw: fi.width,
+                        fh: fi.height,
+                        disposal: fi.disposal || 0
+                    })
+                }
+
+                resolve({ frames, info })
+            } catch (e) {
+                reject(e)
+            }
+        })
     }
 
+    // ─── Render every GIF frame into a cape PNG ───────────────────────────────
+
+    async _renderAllGifFrames() {
+        this._renderedFrames = []
+        for (const frame of this._gifFrames) {
+            const dataUrl = await this._buildStaticCape(frame.canvas.toDataURL())
+            this._renderedFrames.push({ dataUrl, delay: frame.delay })
+        }
+    }
+
+    // ─── Animation loop ───────────────────────────────────────────────────────
+
     _startGifAnimation() {
-        if (!this._gifFrames || this._gifFrames.length <= 1) return;
+        if (!this._renderedFrames || this._renderedFrames.length <= 1) return
         const tick = () => {
-            const frame = this._gifFrames[this._gifFrameIndex];
-            this._renderGifFrame(frame).then(dataUrl => {
-                if (this._onFrameUpdate) this._onFrameUpdate(dataUrl);
-                this._gifFrameIndex = (this._gifFrameIndex + 1) % this._gifFrames.length;
-                // delay is in centiseconds in the GIF spec
-                const delay = (frame.delay || 10) * 10;
-                this._gifAnimTimer = setTimeout(tick, delay);
-            });
-        };
-        const firstFrame = this._gifFrames[this._gifFrameIndex];
-        const delay = (firstFrame.delay || 10) * 10;
-        this._gifAnimTimer = setTimeout(tick, delay);
+            const frame = this._renderedFrames[this._gifFrameIndex]
+            if (this._onFrameUpdate && frame) this._onFrameUpdate(frame.dataUrl)
+            this._gifFrameIndex = (this._gifFrameIndex + 1) % this._renderedFrames.length
+            const next = this._renderedFrames[this._gifFrameIndex]
+            this._gifAnimTimer = setTimeout(tick, next ? next.delay : 100)
+        }
+        const first = this._renderedFrames[0]
+        this._gifAnimTimer = setTimeout(tick, first ? first.delay : 100)
     }
 
     _stopGifAnimation() {
-        if (this._gifAnimTimer) {
-            clearTimeout(this._gifAnimTimer);
-            this._gifAnimTimer = null;
-        }
+        if (this._gifAnimTimer) { clearTimeout(this._gifAnimTimer); this._gifAnimTimer = null }
     }
 
-    /**
-     * Render a single decoded GIF frame onto an offscreen canvas,
-     * then use that canvas as the "image" source for cape building.
-     */
-    _renderGifFrame(frame) {
-        // Build an ImageData from the frame patch
-        const frameCanvas = document.createElement('canvas');
-        frameCanvas.width = frame.dims.width;
-        frameCanvas.height = frame.dims.height;
-        const frameCtx = frameCanvas.getContext('2d');
-
-        // gifuct-js gives us a Uint8ClampedArray of RGBA pixels
-        const imageData = frameCtx.createImageData(frame.dims.width, frame.dims.height);
-        imageData.data.set(frame.patch);
-        frameCtx.putImageData(imageData, 0, 0);
-
-        // If the frame is a patch (disposal), we need to composite onto the full GIF canvas
-        // For simplicity (and because most capes will be full-frame GIFs), we use the patch directly.
-        const frameSrc = frameCanvas.toDataURL();
-        return this._buildStaticCape(frameSrc);
-    }
-
-    // ─── Core cape rendering (static image or single frame) ───────────────────
+    // ─── Core cape render ─────────────────────────────────────────────────────
 
     _buildStaticCape(imageSrc) {
         return new Promise(async (resolve, reject) => {
-            const ctx = this.context;
+            const ctx = this.context
             try {
-                ctx.canvas.width = 64 * this.scale;
-                ctx.canvas.height = 32 * this.scale;
-                ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+                const s = this.scale
+                ctx.canvas.width  = 64 * s
+                ctx.canvas.height = 32 * s
+                ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height)
 
-                const calculateAverageColor = (image) => {
-                    const { data } = image;
-                    const length = data.length;
-                    let count = 0;
-                    let rgb = { r: 0, g: 0, b: 0 };
-                    for (let i = 0; i < length; i += 5 * 4) {
-                        count++;
-                        rgb.r += data[i];
-                        rgb.g += data[i + 1];
-                        rgb.b += data[i + 2];
-                    }
-                    rgb.r = Math.floor(rgb.r / count);
-                    rgb.g = Math.floor(rgb.g / count);
-                    rgb.b = Math.floor(rgb.b / count);
-                    return `#${((1 << 24) | (rgb.r << 16) | (rgb.g << 8) | rgb.b).toString(16).slice(1)}`;
-                };
+                const avgColor = (imgData) => {
+                    const d = imgData.data
+                    let r = 0, g = 0, b = 0, n = 0
+                    for (let i = 0; i < d.length; i += 20) { r += d[i]; g += d[i+1]; b += d[i+2]; n++ }
+                    return `#${((1<<24)|(Math.floor(r/n)<<16)|(Math.floor(g/n)<<8)|Math.floor(b/n)).toString(16).slice(1)}`
+                }
 
-                const fillRect = (x, y, w, h) => ctx.fillRect(x * this.scale, y * this.scale, w * this.scale, h * this.scale);
-                const clearRect = (x, y, w, h) => ctx.clearRect(x * this.scale, y * this.scale, w * this.scale, h * this.scale);
+                const fr = (x,y,w,h) => ctx.fillRect(x*s,y*s,w*s,h*s)
+                const cr = (x,y,w,h) => ctx.clearRect(x*s,y*s,w*s,h*s)
 
-                const loadImage = (src) => new Promise((res, rej) => {
-                    const i = new Image();
-                    i.crossOrigin = "anonymous";
-                    i.onload = () => res(i);
-                    i.onerror = (e) => rej(e);
-                    i.src = src;
-                });
+                const loadImg = (src) => new Promise((res, rej) => {
+                    if (src instanceof HTMLCanvasElement) { res(src); return }
+                    const i = new Image(); i.crossOrigin = "anonymous"
+                    i.onload = () => res(i); i.onerror = rej; i.src = src
+                })
 
-                let bgImg = null, fgImg = null;
-                const tasks = [];
-                if (this.background) tasks.push(loadImage(this.background).then(i => (bgImg = i)));
-                if (imageSrc) tasks.push(loadImage(imageSrc).then(i => (fgImg = i)));
-
-                await Promise.all(tasks);
+                let bgImg = null, fgImg = null
+                const tasks = []
+                if (this.background) tasks.push(loadImg(this.background).then(i => bgImg = i))
+                if (imageSrc)        tasks.push(loadImg(imageSrc).then(i => fgImg = i))
+                await Promise.all(tasks)
 
                 if (bgImg) {
-                    ctx.imageSmoothingEnabled = false;
-                    ctx.drawImage(bgImg, 0, 0, bgImg.width, bgImg.height, 0, 0, this.canvas.width, this.canvas.height);
+                    ctx.imageSmoothingEnabled = false
+                    ctx.drawImage(bgImg, 0, 0, bgImg.width, bgImg.height, 0, 0, ctx.canvas.width, ctx.canvas.height)
                 }
 
                 if (fgImg) {
-                    ctx.drawImage(fgImg, 1 * this.scale, 1 * this.scale, 10 * this.scale, 16 * this.scale);
-
-                    if (this.color === this.AUTO_COLOR) {
-                        const capeRegion = ctx.getImageData(1 * this.scale, 1 * this.scale, 10 * this.scale, 16 * this.scale);
-                        ctx.fillStyle = calculateAverageColor(capeRegion);
-                    } else {
-                        ctx.fillStyle = this.color;
-                    }
+                    ctx.drawImage(fgImg, 1*s, 1*s, 10*s, 16*s)
+                    ctx.fillStyle = this.color === this.AUTO_COLOR
+                        ? avgColor(ctx.getImageData(1*s, 1*s, 10*s, 16*s))
+                        : this.color
 
                     if (this.elytraImage) {
-                        ctx.drawImage(fgImg, 36 * this.scale, 2 * this.scale, 10 * this.scale, 20 * this.scale);
+                        ctx.drawImage(fgImg, 36*s, 2*s, 10*s, 20*s)
                     } else if (!this.background) {
-                        fillRect(36, 2, 10, 20);
+                        fr(36,2,10,20)
                     }
 
                     if (!this.background) {
-                        fillRect(0, 1, 1, 16);
-                        fillRect(1, 0, 10, 1);
-                        fillRect(11, 1, 1, 16);
-                        fillRect(11, 0, 10, 1);
-                        fillRect(12, 1, 10, 16);
-
-                        fillRect(22, 11, 1, 11);
-                        fillRect(31, 0, 3, 1);
-                        fillRect(32, 1, 2, 1);
-                        fillRect(34, 0, 6, 1);
-                        fillRect(34, 2, 1, 2);
-                        fillRect(35, 2, 1, 9);
+                        fr(0,1,1,16);  fr(1,0,10,1);  fr(11,1,1,16); fr(11,0,10,1)
+                        fr(12,1,10,16);fr(22,11,1,11);fr(31,0,3,1);  fr(32,1,2,1)
+                        fr(34,0,6,1);  fr(34,2,1,2);  fr(35,2,1,9)
                     }
 
                     if (!this.background || (this.background && this.elytraImage)) {
-                        clearRect(36, 16, 1, 6);
-                        clearRect(37, 19, 1, 3);
-                        clearRect(38, 21, 1, 1);
-                        clearRect(42, 2, 1, 1);
-                        clearRect(43, 2, 1, 2);
-                        clearRect(44, 2, 1, 5);
-                        clearRect(45, 2, 1, 9);
+                        cr(36,16,1,6); cr(37,19,1,3); cr(38,21,1,1)
+                        cr(42,2,1,1);  cr(43,2,1,2);  cr(44,2,1,5);  cr(45,2,1,9)
                     }
                 }
 
-                resolve(ctx.canvas.toDataURL());
+                resolve(ctx.canvas.toDataURL())
             } catch (err) {
-                reject(err);
+                reject(err)
             }
-        });
+        })
     }
 
-    // ─── Download ─────────────────────────────────────────────────────────────
+    // ─── Export: PNG (current frame) ──────────────────────────────────────────
 
     downloadCape(name = "Cape") {
-        let link = document.createElement('a');
-        link.setAttribute('download', `${name}.png`);
-        link.setAttribute('href', this.context.canvas.toDataURL("image/png").replace("image/png", "image/octet-stream"));
-        link.click();
+        const link = document.createElement('a')
+        link.download = `${name}.png`
+        link.href = this.context.canvas.toDataURL("image/png").replace("image/png", "image/octet-stream")
+        link.click()
+    }
+
+    // ─── Export: Animated GIF via gif.js ──────────────────────────────────────
+
+    exportGif(name = "Cape") {
+        return new Promise((resolve, reject) => {
+            if (!this._renderedFrames?.length) { reject(new Error("No frames")); return }
+            if (typeof GIF === 'undefined') { reject(new Error("gif.js not loaded")); return }
+
+            const gif = new GIF({
+                workers: 2,
+                quality: 10,
+                width:  64 * this.scale,
+                height: 32 * this.scale,
+                workerScript: 'https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js'
+            })
+
+            const loadImg = (dataUrl) => new Promise((res, rej) => {
+                const img = new Image(); img.onload = () => res(img); img.onerror = rej; img.src = dataUrl
+            })
+
+            Promise.all(this._renderedFrames.map(f => loadImg(f.dataUrl))).then(images => {
+                images.forEach((img, i) => gif.addFrame(img, { delay: this._renderedFrames[i].delay }))
+                gif.on('finished', blob => {
+                    const url = URL.createObjectURL(blob)
+                    const link = document.createElement('a')
+                    link.href = url; link.download = `${name}.gif`; link.click()
+                    setTimeout(() => URL.revokeObjectURL(url), 5000)
+                    resolve()
+                })
+                gif.on('error', reject)
+                gif.render()
+            }).catch(reject)
+        })
+    }
+
+    // ─── Export: ZIP of PNG frames via JSZip ─────────────────────────────────
+
+    exportFramesZip(name = "Cape") {
+        return new Promise((resolve, reject) => {
+            if (!this._renderedFrames?.length) { reject(new Error("No frames")); return }
+            if (typeof JSZip === 'undefined') { reject(new Error("JSZip not loaded")); return }
+
+            const zip = new JSZip()
+            const folder = zip.folder(name)
+            const pad = (n) => String(n).padStart(String(this._renderedFrames.length).length, '0')
+
+            this._renderedFrames.forEach((frame, i) => {
+                folder.file(`frame_${pad(i + 1)}.png`, frame.dataUrl.split(',')[1], { base64: true })
+            })
+
+            zip.generateAsync({ type: 'blob' }).then(blob => {
+                const url = URL.createObjectURL(blob)
+                const link = document.createElement('a')
+                link.href = url; link.download = `${name}_frames.zip`; link.click()
+                setTimeout(() => URL.revokeObjectURL(url), 5000)
+                resolve()
+            }).catch(reject)
+        })
     }
 }
 
-window.MinecraftCapeCreator = MinecraftCapeCreator;
-export default MinecraftCapeCreator;
+window.MinecraftCapeCreator = MinecraftCapeCreator
+export default MinecraftCapeCreator

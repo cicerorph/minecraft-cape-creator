@@ -17,9 +17,10 @@
                             <div class="col-md-6 mb-1">
                                 <div>
                                     <h4>Select Image</h4>
+                                    <!-- Accept GIFs as well -->
                                     <div class="row">
                                         <div class="col-7">
-                                            <input type="file" class="form-control" @change="uploadImage" accept="image/*">
+                                            <input type="file" class="form-control" @change="uploadImage" accept="image/*,.gif">
                                         </div>
                                         <div class="col-1 align-middle align-content-center">
                                             <p class="d-inline">or</p>
@@ -27,6 +28,11 @@
                                         <div class="col-4">
                                             <button class="btn btn-primary" @click="loadRandomImage">Random Image</button>
                                         </div>
+                                    </div>
+                                    <!-- GIF badge shown when a GIF is loaded -->
+                                    <div v-if="isGif" class="mt-2">
+                                        <span class="badge bg-success">🎞️ Animated GIF — {{ gifFrameCount }} frames</span>
+                                        <small class="text-muted ms-2">The preview and viewer will animate. Download saves the current frame as PNG.</small>
                                     </div>
                                 </div>
                                 <br>
@@ -89,7 +95,10 @@
                             <div class="col-md-6 mb-1">
                                 <h3 class="text-center">Your Cape</h3>
                                 <p>This is your final cape design. You can download your cape by using the button below.</p>
-                                <p>This project aims to help users move images onto capes with minimual effort.</p>
+                                <p>This project aims to help users move images onto capes with minimal effort.</p>
+                                <p v-if="isGif" class="text-warning small">
+                                    ⚠️ GIF capes are animated in the preview. The downloaded file is a PNG snapshot of the current frame — full animated GIF export is not supported by the Minecraft cape format.
+                                </p>
                                 <button @click="downloadCape" class="btn btn-primary">Download Cape</button>
                             </div>
                             <div class="col-md-6">
@@ -108,6 +117,13 @@
             </div>
         </div>
         <link rel="stylesheet" href="https://unpkg.com/cropperjs@1.6.2/dist/cropper.min.css"/>
+
+        <!--
+            gifuct-js — pure JS GIF decoder.
+            Exposes window.gifuctJs = { parseGIF, decompressFrames }
+        -->
+        <script src="https://cdn.jsdelivr.net/npm/gifuct-js@2.1.2/dist/gifuct-js.js"></script>
+
         <style>
             #minecraft-skin-viewer {
                 width: 100%;
@@ -147,6 +163,9 @@
                         scale: 1,
                         templateImageSrc: null,
                         capePreviewSrc: null,
+                        // GIF state
+                        isGif: false,
+                        gifFrameCount: 0,
                     }
                 },
                 created() {
@@ -167,10 +186,18 @@
                     })
                     this.minecraftSkinViewer.playerObject.group.rotation.y = Math.PI
 
+                    // Register GIF frame callback — updates preview & 3-D viewer each frame
+                    this.minecraftCapeCreator.onFrameUpdate((dataUrl) => {
+                        this.capePreviewSrc = dataUrl;
+                        this.minecraftSkinViewer.loadCape(dataUrl);
+                    });
+
                     this.buildCape()
                 },
                 methods: {
                     loadRandomImage() {
+                        this.isGif = false;
+                        this.gifFrameCount = 0;
                         this.seed = Date.now()
                         this.templateImageSrc = `https://picsum.photos/seed/${this.seed}/1600/900`
                         if(this.cropper != null) {
@@ -180,15 +207,71 @@
                     toggleElytra(value) {
                         this.minecraftSkinViewer.setElytra(value.target.checked)
                     },
+
                     uploadImage(event) {
-                        if(event.target.files.length > 0) {
-                            var reader = new FileReader()
-                            reader.readAsDataURL(event.target.files[0])
+                        if (event.target.files.length === 0) return;
+
+                        const file = event.target.files[0];
+                        const isGif = file.type === 'image/gif';
+
+                        const reader = new FileReader();
+
+                        if (isGif) {
+                            // Read as data URL for both cropper preview and GIF detection
+                            reader.readAsDataURL(file);
                             reader.onload = () => {
-                                this.cropper.replace(reader.result)
+                                const dataUrl = reader.result;
+
+                                // Show a static preview in the cropper (can't crop animated GIFs meaningfully,
+                                // but we still display the first frame via the data URL)
+                                this.templateImageSrc = dataUrl;
+                                if (this.cropper != null) {
+                                    // Replace cropper source; crop events won't fire for GIFs
+                                    // so we drive the cape update from here instead.
+                                    this.cropper.replace(dataUrl);
+                                }
+
+                                // Pass raw data URL to creator (it detects GIF internally)
+                                this.minecraftCapeCreator.setImage(dataUrl);
+
+                                // Read frame count for the UI badge
+                                this._readGifFrameCount(dataUrl).then(count => {
+                                    this.isGif = true;
+                                    this.gifFrameCount = count;
+                                });
+
+                                this.buildCape();
+                            };
+                        } else {
+                            this.isGif = false;
+                            this.gifFrameCount = 0;
+                            reader.readAsDataURL(file);
+                            reader.onload = () => {
+                                this.cropper.replace(reader.result);
                             };
                         }
                     },
+
+                    /**
+                     * Decode a GIF data URL just to count its frames.
+                     * Returns a Promise<number>.
+                     */
+                    async _readGifFrameCount(dataUrl) {
+                        try {
+                            const base64 = dataUrl.split(',')[1];
+                            const binary = atob(base64);
+                            const buf = new ArrayBuffer(binary.length);
+                            const bytes = new Uint8Array(buf);
+                            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                            const { parseGIF, decompressFrames } = window.gifuctJs;
+                            const gif = parseGIF(buf);
+                            const frames = decompressFrames(gif, true);
+                            return frames.length;
+                        } catch {
+                            return 0;
+                        }
+                    },
+
                     uploadBackground(event) {
                         if(event.target.files.length == 0) {
                             this.minecraftCapeCreator.setBackground(null)
@@ -208,6 +291,11 @@
                         this.buildCape();
                     },
                     changeImage() {
+                        // For GIFs, the cropper fires `cropend` but we don't use the cropped canvas
+                        // because it only captures the static first frame. The full GIF data URL is
+                        // already set in setImage() inside uploadImage().
+                        if (this.isGif) return;
+
                         this.minecraftCapeCreator.setImage(this.cropper.getCroppedCanvas().toDataURL())
                         this.buildCape();
                     },
@@ -242,4 +330,5 @@
             }).mount('#app')
           </script>
     </body>
-</html>
+                                        </html>
+    

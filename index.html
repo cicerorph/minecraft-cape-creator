@@ -15,12 +15,12 @@
                         <hr>
                         <div class="row">
                             <div class="col-md-6 mb-1">
+                                <!-- Image selector -->
                                 <div>
                                     <h4>Select Image</h4>
-                                    <!-- Accept GIFs as well -->
                                     <div class="row">
                                         <div class="col-7">
-                                            <input type="file" class="form-control" @change="uploadImage" accept="image/*,.gif">
+                                            <input type="file" class="form-control" @change="uploadImage" accept="image/*">
                                         </div>
                                         <div class="col-1 align-middle align-content-center">
                                             <p class="d-inline">or</p>
@@ -29,28 +29,36 @@
                                             <button class="btn btn-primary" @click="loadRandomImage">Random Image</button>
                                         </div>
                                     </div>
-                                    <!-- GIF badge shown when a GIF is loaded -->
-                                    <div v-if="isGif" class="mt-2">
-                                        <span class="badge bg-success">🎞️ Animated GIF — {{ gifFrameCount }} frames</span>
-                                        <small class="text-muted ms-2">The preview and viewer will animate. Download saves the current frame as PNG.</small>
+                                    <!-- GIF info badge -->
+                                    <div v-if="isGif" class="mt-2 d-flex align-items-center gap-2 flex-wrap">
+                                        <span class="badge bg-success fs-6">🎞️ GIF — {{ gifFrameCount }} frames</span>
+                                        <small class="text-muted">Preview &amp; viewer animate in real-time.</small>
+                                    </div>
+                                    <!-- Processing indicator -->
+                                    <div v-if="processing" class="mt-2">
+                                        <div class="d-flex align-items-center gap-2">
+                                            <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+                                            <small class="text-muted">{{ processingMsg }}</small>
+                                        </div>
                                     </div>
                                 </div>
                                 <br>
+                                <!-- Background -->
                                 <div>
                                     <h4>Select Background (Optional)</h4>
                                     <input type="file" class="form-control" @change="uploadBackground" accept="image/png">
                                 </div>
                                 <br>
+                                <!-- Elytra toggle -->
                                 <div>
                                     <h4>Show on Elytra</h4>
                                     <div class="form-check">
                                         <input class="form-check-input" type="checkbox" v-model="showOnElytra" @change="changeElytra">
-                                        <label class="form-check-label">
-                                            Show on Elytra
-                                        </label>
+                                        <label class="form-check-label">Show on Elytra</label>
                                     </div>
                                 </div>
                                 <br>
+                                <!-- Color -->
                                 <div>
                                     <h4>Set Color</h4>
                                     <div class="row">
@@ -63,23 +71,25 @@
                                         <div class="col-4">
                                             <div class="form-check">
                                                 <input class="form-check-input" type="checkbox" v-model="autoColor" @change="changeColour">
-                                                <label class="form-check-label">
-                                                    Auto Color
-                                                </label>
+                                                <label class="form-check-label">Auto Color</label>
                                             </div>
                                         </div>
                                     </div>
                                 </div>
                                 <br>
+                                <!-- Scale -->
                                 <div>
                                     <h4>Set Scale ({{ visualiseScale }})</h4>
                                     <input type="range" class="form-range" min="1" max="6" step="1" v-model="scale" @change="changeScale">
                                 </div>
                                 <hr>
+                                <!-- Cropper -->
                                 <div>
                                     <img id="cropper-image" :src="templateImageSrc" class="mw-100"/>
                                 </div>
                             </div>
+
+                            <!-- 3D Viewer -->
                             <div class="col-md-6">
                                 <div class="position-relative">
                                     <div class="form-check form-switch position-absolute m-3 end-0">
@@ -90,22 +100,59 @@
                                 <canvas id="minecraft-skin-viewer" class="border rounded shadow-lg"></canvas>
                             </div>
                         </div>
+
                         <hr>
+
+                        <!-- Download section -->
                         <div class="row">
                             <div class="col-md-6 mb-1">
                                 <h3 class="text-center">Your Cape</h3>
-                                <p>This is your final cape design. You can download your cape by using the button below.</p>
+                                <p>This is your final cape design.</p>
                                 <p>This project aims to help users move images onto capes with minimal effort.</p>
-                                <p v-if="isGif" class="text-warning small">
-                                    ⚠️ GIF capes are animated in the preview. The downloaded file is a PNG snapshot of the current frame — full animated GIF export is not supported by the Minecraft cape format.
-                                </p>
-                                <button @click="downloadCape" class="btn btn-primary">Download Cape</button>
+
+                                <!-- Export buttons -->
+                                <div class="d-flex flex-wrap gap-2">
+                                    <!-- Always available: current frame PNG -->
+                                    <button @click="downloadCape" class="btn btn-primary" :disabled="processing">
+                                        ⬇ Download PNG
+                                    </button>
+
+                                    <!-- GIF-only exports -->
+                                    <template v-if="isGif">
+                                        <button @click="doExportGif"
+                                                class="btn btn-success"
+                                                :disabled="processing || exportingGif">
+                                            <span v-if="exportingGif">
+                                                <span class="spinner-border spinner-border-sm me-1"></span>
+                                                Encoding GIF…
+                                            </span>
+                                            <span v-else>🎞 Export Animated GIF</span>
+                                        </button>
+
+                                        <button @click="doExportZip"
+                                                class="btn btn-warning text-dark"
+                                                :disabled="processing || exportingZip">
+                                            <span v-if="exportingZip">
+                                                <span class="spinner-border spinner-border-sm me-1"></span>
+                                                Zipping…
+                                            </span>
+                                            <span v-else>🗜 Export Frames (.zip)</span>
+                                        </button>
+                                    </template>
+                                </div>
+
+                                <!-- Export error -->
+                                <div v-if="exportError" class="alert alert-danger mt-2 py-2 small">
+                                    {{ exportError }}
+                                </div>
                             </div>
+
                             <div class="col-md-6">
                                 <img :src="capePreviewSrc" class="texture-preview w-100 border mb-1"/>
                             </div>
                             <hr class="my-2">
                         </div>
+
                         <hr>
                         <div class="text-center">
                             Created by <a target="_blank" href="https://github.com/james090500">James Harrison</a> for <a target="_blank" href="https://minecraftcapes.net">MinecraftCapes</a>
@@ -116,13 +163,17 @@
                 </div>
             </div>
         </div>
+
         <link rel="stylesheet" href="https://unpkg.com/cropperjs@1.6.2/dist/cropper.min.css"/>
 
         <!--
-            gifuct-js — pure JS GIF decoder.
-            Exposes window.gifuctJs = { parseGIF, decompressFrames }
+            omggif  — GIF decoder (exposes GifReader globally)
+            gif.js  — GIF encoder
+            JSZip   — ZIP builder
         -->
-        <script src="https://cdn.jsdelivr.net/npm/gifuct-js@2.1.2/lib/index.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/omggif@1.0.10/omggif.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
         <style>
             #minecraft-skin-viewer {
@@ -132,17 +183,12 @@
                 background: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgAQMAAABJtOi3AAAABlBMVEUgIDAcHCq70aXDAAAAE0lEQVQI12P4/5+BgZoEA3VNBADtvT/BrQ+bEwAAAABJRU5ErkJggg==');
                 background-repeat: repeat;
             }
-
             @media (max-width: 576px) {
-                #minecraft-skin-viewer {
-                    height: 50vh;
-                }
+                #minecraft-skin-viewer { height: 50vh; }
             }
-
-            .texture-preview {
-                image-rendering: pixelated;
-            }
+            .texture-preview { image-rendering: pixelated; }
         </style>
+
         <script type="module">
             import { createApp } from 'https://unpkg.com/vue@3/dist/vue.esm-browser.js'
             import CropperJS from 'https://unpkg.com/cropperjs@1.6.2/dist/cropper.esm.js'
@@ -156,7 +202,6 @@
                         minecraftSkinViewer: null,
                         minecraftCapeCreator: new MinecraftCapeCreator(),
                         cropper: null,
-                        file: "",
                         showOnElytra: true,
                         autoColor: true,
                         color: "#FF0000",
@@ -166,13 +211,19 @@
                         // GIF state
                         isGif: false,
                         gifFrameCount: 0,
+                        // UI state
+                        processing: false,
+                        processingMsg: '',
+                        exportingGif: false,
+                        exportingZip: false,
+                        exportError: null,
                     }
                 },
                 created() {
-                    this.loadRandomImage();
+                    this.loadRandomImage()
                 },
                 mounted() {
-                    let image = document.getElementById('cropper-image')
+                    const image = document.getElementById('cropper-image')
                     this.cropper = new CropperJS(image, {
                         aspectRatio: 10 / 16,
                         guides: false,
@@ -186,149 +237,159 @@
                     })
                     this.minecraftSkinViewer.playerObject.group.rotation.y = Math.PI
 
-                    // Register GIF frame callback — updates preview & 3-D viewer each frame
+                    // Live frame updates during GIF animation
                     this.minecraftCapeCreator.onFrameUpdate((dataUrl) => {
-                        this.capePreviewSrc = dataUrl;
-                        this.minecraftSkinViewer.loadCape(dataUrl);
-                    });
+                        this.capePreviewSrc = dataUrl
+                        this.minecraftSkinViewer.loadCape(dataUrl)
+                    })
 
                     this.buildCape()
                 },
                 methods: {
                     loadRandomImage() {
-                        this.isGif = false;
-                        this.gifFrameCount = 0;
+                        this.isGif = false
+                        this.gifFrameCount = 0
+                        this.exportError = null
                         this.seed = Date.now()
                         this.templateImageSrc = `https://picsum.photos/seed/${this.seed}/1600/900`
-                        if(this.cropper != null) {
-                            this.cropper.replace(this.templateImageSrc)
-                        }
+                        if (this.cropper) this.cropper.replace(this.templateImageSrc)
                     },
+
                     toggleElytra(value) {
                         this.minecraftSkinViewer.setElytra(value.target.checked)
                     },
 
                     uploadImage(event) {
-                        if (event.target.files.length === 0) return;
+                        if (!event.target.files.length) return
+                        this.exportError = null
+                        const file = event.target.files[0]
+                        const isGif = file.type === 'image/gif'
 
-                        const file = event.target.files[0];
-                        const isGif = file.type === 'image/gif';
+                        const reader = new FileReader()
+                        reader.readAsDataURL(file)
+                        reader.onload = () => {
+                            const dataUrl = reader.result
 
-                        const reader = new FileReader();
+                            if (isGif) {
+                                // Show static first frame in cropper
+                                this.templateImageSrc = dataUrl
+                                if (this.cropper) this.cropper.replace(dataUrl)
 
-                        if (isGif) {
-                            // Read as data URL for both cropper preview and GIF detection
-                            reader.readAsDataURL(file);
-                            reader.onload = () => {
-                                const dataUrl = reader.result;
+                                this.minecraftCapeCreator.setImage(dataUrl)
 
-                                // Show a static preview in the cropper (can't crop animated GIFs meaningfully,
-                                // but we still display the first frame via the data URL)
-                                this.templateImageSrc = dataUrl;
-                                if (this.cropper != null) {
-                                    // Replace cropper source; crop events won't fire for GIFs
-                                    // so we drive the cape update from here instead.
-                                    this.cropper.replace(dataUrl);
-                                }
+                                // Count frames for badge
+                                this._countGifFrames(dataUrl).then(count => {
+                                    this.isGif = true
+                                    this.gifFrameCount = count
+                                })
+                            } else {
+                                this.isGif = false
+                                this.gifFrameCount = 0
+                                if (this.cropper) this.cropper.replace(dataUrl)
+                                // changeImage() fires from cropend/ready
+                                return
+                            }
 
-                                // Pass raw data URL to creator (it detects GIF internally)
-                                this.minecraftCapeCreator.setImage(dataUrl);
-
-                                // Read frame count for the UI badge
-                                this._readGifFrameCount(dataUrl).then(count => {
-                                    this.isGif = true;
-                                    this.gifFrameCount = count;
-                                });
-
-                                this.buildCape();
-                            };
-                        } else {
-                            this.isGif = false;
-                            this.gifFrameCount = 0;
-                            reader.readAsDataURL(file);
-                            reader.onload = () => {
-                                this.cropper.replace(reader.result);
-                            };
+                            this.buildCape()
                         }
                     },
 
-                    /**
-                     * Decode a GIF data URL just to count its frames.
-                     * Returns a Promise<number>.
-                     */
-                    async _readGifFrameCount(dataUrl) {
+                    async _countGifFrames(dataUrl) {
                         try {
-                            const base64 = dataUrl.split(',')[1];
-                            const binary = atob(base64);
-                            const buf = new ArrayBuffer(binary.length);
-                            const bytes = new Uint8Array(buf);
-                            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-                            const { parseGIF, decompressFrames } = window.gifuctJs;
-                            const gif = parseGIF(buf);
-                            const frames = decompressFrames(gif, true);
-                            return frames.length;
-                        } catch {
-                            return 0;
-                        }
+                            const base64 = dataUrl.split(',')[1]
+                            const binary = atob(base64)
+                            const buf = new Uint8Array(binary.length)
+                            for (let i = 0; i < binary.length; i++) buf[i] = binary.charCodeAt(i)
+                            const gr = new GifReader(buf)
+                            return gr.numFrames()
+                        } catch { return 0 }
                     },
 
                     uploadBackground(event) {
-                        if(event.target.files.length == 0) {
+                        if (!event.target.files.length) {
                             this.minecraftCapeCreator.setBackground(null)
                             this.buildCape()
-                            return;
-                        } else {
-                            var reader = new FileReader()
-                            reader.readAsDataURL(event.target.files[0])
-                            reader.onload = () => {
-                                this.minecraftCapeCreator.setBackground(reader.result)
-                                this.buildCape()
-                            };
+                            return
+                        }
+                        const reader = new FileReader()
+                        reader.readAsDataURL(event.target.files[0])
+                        reader.onload = () => {
+                            this.minecraftCapeCreator.setBackground(reader.result)
+                            this.buildCape()
                         }
                     },
+
                     changeElytra(value) {
                         this.minecraftCapeCreator.showOnElytra(value.target.checked)
-                        this.buildCape();
-                    },
-                    changeImage() {
-                        // For GIFs, the cropper fires `cropend` but we don't use the cropped canvas
-                        // because it only captures the static first frame. The full GIF data URL is
-                        // already set in setImage() inside uploadImage().
-                        if (this.isGif) return;
-
-                        this.minecraftCapeCreator.setImage(this.cropper.getCroppedCanvas().toDataURL())
-                        this.buildCape();
-                    },
-                    changeColour() {
-                        if(this.autoColor) {
-                            this.minecraftCapeCreator.setAutoColor()
-                        } else {
-                            this.minecraftCapeCreator.setColor(this.color)
-                        }
                         this.buildCape()
                     },
+
+                    changeImage() {
+                        if (this.isGif) return  // GIF path managed by uploadImage
+                        this.minecraftCapeCreator.setImage(this.cropper.getCroppedCanvas().toDataURL())
+                        this.buildCape()
+                    },
+
+                    changeColour() {
+                        if (this.autoColor) this.minecraftCapeCreator.setAutoColor()
+                        else this.minecraftCapeCreator.setColor(this.color)
+                        this.buildCape()
+                    },
+
                     changeScale() {
                         this.minecraftCapeCreator.setScale(this.scale)
                         this.buildCape()
                     },
+
                     buildCape() {
+                        const isAnimated = this.isGif
+                        if (isAnimated) {
+                            this.processing = true
+                            this.processingMsg = `Rendering ${this.gifFrameCount} frames…`
+                        }
+
                         this.minecraftCapeCreator.buildCape().then(value => {
-                            this.capePreviewSrc = value;
-                            this.minecraftSkinViewer.loadCape(this.capePreviewSrc)
+                            this.capePreviewSrc = value
+                            this.minecraftSkinViewer.loadCape(value)
+                            this.processing = false
+                        }).catch(() => {
+                            this.processing = false
                         })
                     },
+
                     downloadCape() {
-                        this.minecraftCapeCreator.downloadCape();
+                        this.minecraftCapeCreator.downloadCape()
+                    },
+
+                    doExportGif() {
+                        this.exportError = null
+                        this.exportingGif = true
+                        this.minecraftCapeCreator.exportGif('Cape').then(() => {
+                            this.exportingGif = false
+                        }).catch(err => {
+                            this.exportingGif = false
+                            this.exportError = `GIF export failed: ${err.message}`
+                        })
+                    },
+
+                    doExportZip() {
+                        this.exportError = null
+                        this.exportingZip = true
+                        this.minecraftCapeCreator.exportFramesZip('Cape').then(() => {
+                            this.exportingZip = false
+                        }).catch(err => {
+                            this.exportingZip = false
+                            this.exportError = `ZIP export failed: ${err.message}`
+                        })
                     }
                 },
                 computed: {
                     visualiseScale() {
-                        let realScale = Math.pow(2, this.scale - 1)
-                        return `${64 * realScale} / ${32 * realScale}`
+                        const r = Math.pow(2, this.scale - 1)
+                        return `${64 * r} / ${32 * r}`
                     }
                 }
             }).mount('#app')
-          </script>
+        </script>
     </body>
-                                        </html>
-    
+</html>

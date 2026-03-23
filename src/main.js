@@ -273,20 +273,39 @@ class MinecraftCapeCreator {
             if (!this._renderedFrames?.length) { reject(new Error("No frames")); return }
             if (typeof GIF === 'undefined') { reject(new Error("gif.js not loaded")); return }
 
+            const CORS_PROXY = 'https://cors-proxy-mubi.ciceroraphael-turmaprealfa.workers.dev/cors?target='
+            const workerUrl = `${CORS_PROXY}${encodeURIComponent('https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js')}`
+
             const gif = new GIF({
                 workers: 2,
                 quality: 10,
                 width:  64 * this.scale,
                 height: 32 * this.scale,
-                workerScript: 'https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js'
+                workerScript: workerUrl
             })
 
-            const loadImg = (dataUrl) => new Promise((res, rej) => {
-                const img = new Image(); img.onload = () => res(img); img.onerror = rej; img.src = dataUrl
+            // Convert each rendered frame dataUrl → canvas so gif.js reads
+            // the already-composited cape pixels, not the original image.
+            const dataUrlToCanvas = (dataUrl) => new Promise((res, rej) => {
+                const img = new Image()
+                img.onload = () => {
+                    const c = document.createElement('canvas')
+                    c.width = img.naturalWidth
+                    c.height = img.naturalHeight
+                    c.getContext('2d').drawImage(img, 0, 0)
+                    res(c)
+                }
+                img.onerror = rej
+                img.src = dataUrl
             })
 
-            Promise.all(this._renderedFrames.map(f => loadImg(f.dataUrl))).then(images => {
-                images.forEach((img, i) => gif.addFrame(img, { delay: this._renderedFrames[i].delay }))
+            Promise.all(this._renderedFrames.map(f => dataUrlToCanvas(f.dataUrl))).then(canvases => {
+                canvases.forEach((canvas, i) => {
+                    gif.addFrame(canvas, {
+                        delay: this._renderedFrames[i].delay,
+                        copy: true   // gif.js must copy pixels before we reuse the canvas
+                    })
+                })
                 gif.on('finished', blob => {
                     const url = URL.createObjectURL(blob)
                     const link = document.createElement('a')

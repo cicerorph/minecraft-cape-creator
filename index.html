@@ -167,11 +167,11 @@
         <link rel="stylesheet" href="https://unpkg.com/cropperjs@1.6.2/dist/cropper.min.css"/>
 
         <!--
-            omggif  — GIF decoder (exposes GifReader globally)
-            gif.js  — GIF encoder
-            JSZip   — ZIP builder
+            libgif-js  — GIF decoder via SuperGif (uses browser's native compositor)
+            gif.js     — GIF encoder
+            JSZip      — ZIP builder
         -->
-        <script src="https://cdn.jsdelivr.net/npm/omggif@1.0.10/omggif.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/gifler@0.1.0/gifler.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
@@ -295,14 +295,16 @@
                     },
 
                     async _countGifFrames(dataUrl) {
+                        // Count GIF frames by scanning the raw bytes for Image Descriptor blocks (0x2C)
                         try {
                             const base64 = dataUrl.split(',')[1]
                             const binary = atob(base64)
-                            const buf = new Uint8Array(binary.length)
-                            for (let i = 0; i < binary.length; i++) buf[i] = binary.charCodeAt(i)
-                            const gr = new GifReader(buf)
-                            return gr.numFrames()
-                        } catch { return 0 }
+                            let count = 0
+                            for (let i = 0; i < binary.length; i++) {
+                                if (binary.charCodeAt(i) === 0x2C) count++
+                            }
+                            return count || 1
+                        } catch { return 1 }
                     },
 
                     uploadBackground(event) {

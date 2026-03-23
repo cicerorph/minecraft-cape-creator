@@ -192,12 +192,15 @@ class MinecraftCapeCreator {
 
     _buildStaticCape(imageSrc) {
         return new Promise(async (resolve, reject) => {
-            const ctx = this.context
             try {
                 const s = this.scale
-                ctx.canvas.width  = 64 * s
-                ctx.canvas.height = 32 * s
-                ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height)
+
+                // Fresh canvas per call — prevents GIF frames from bleeding into each other
+                const offscreen = document.createElement('canvas')
+                offscreen.width  = 64 * s
+                offscreen.height = 32 * s
+                const ctx = offscreen.getContext('2d', { willReadFrequently: true })
+                // No need to clearRect — brand-new canvas is already transparent
 
                 const avgColor = (imgData) => {
                     const d = imgData.data
@@ -223,7 +226,7 @@ class MinecraftCapeCreator {
 
                 if (bgImg) {
                     ctx.imageSmoothingEnabled = false
-                    ctx.drawImage(bgImg, 0, 0, bgImg.width, bgImg.height, 0, 0, ctx.canvas.width, ctx.canvas.height)
+                    ctx.drawImage(bgImg, 0, 0, bgImg.width, bgImg.height, 0, 0, offscreen.width, offscreen.height)
                 }
 
                 if (fgImg) {
@@ -250,7 +253,12 @@ class MinecraftCapeCreator {
                     }
                 }
 
-                resolve(ctx.canvas.toDataURL())
+                // Mirror to shared canvas so downloadCape() always has the latest frame
+                this.canvas.width  = offscreen.width
+                this.canvas.height = offscreen.height
+                this.context.drawImage(offscreen, 0, 0)
+
+                resolve(offscreen.toDataURL())
             } catch (err) {
                 reject(err)
             }

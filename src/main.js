@@ -1,53 +1,57 @@
 /**
  * MinecraftCapeCreator
- * - GIF decode:  gifler  (usa o renderer nativo do browser — compositing 100% correto)
- * - GIF export:  gif.js  + allorigins CORS proxy para o worker
+ * - GIF decode:  omggif (GifReader) — parse manual correto frame a frame
+ * - GIF export:  gif.js + allorigins CORS proxy
  * - ZIP export:  JSZip
  */
 
 class MinecraftCapeCreator {
     constructor() {
-        this.canvas = document.createElement('canvas')
+        this.canvas  = document.createElement('canvas')
         this.context = this.canvas.getContext('2d', { willReadFrequently: true })
 
-        this.AUTO_COLOR = 'auto'
-        this.color      = this.AUTO_COLOR
-        this.scale      = 1
+        this.AUTO_COLOR  = 'auto'
+        this.color       = this.AUTO_COLOR
+        this.scale       = 1
         this.elytraImage = true
 
-        this._gifFrameIndex  = 0
-        this._gifAnimTimer   = null
-        this._onFrameUpdate  = null   // (dataUrl) => void
+        this._gifFrameIndex = 0
+        this._gifAnimTimer  = null
+        this._onFrameUpdate = null  // (dataUrl) => void
 
-        this._imageSrc    = null      // data URL for static images
-        this._isGif       = false
-        this._gifDataUrl  = null      // kept for gifler
+        this._imageSrc   = null
+        this._isGif      = false
+        this._gifBytes   = null     // Uint8Array
 
-        this._renderedFrames = []     // [{ dataUrl, delay }]
+        this._renderedFrames = []   // [{ dataUrl, delay }]
         this.background = null
     }
 
     // ─── Setters ──────────────────────────────────────────────────────────────
 
-    setColor(color)  { this.color = color }
-    setAutoColor()   { this.color = this.AUTO_COLOR }
-    setScale(scale)  { this.scale = Math.pow(2, Math.max(1, Math.min(scale, 6)) - 1) }
-    setBackground(b) { this.background = b }
-    showOnElytra(v)  { this.elytraImage = v }
-    onFrameUpdate(cb){ this._onFrameUpdate = cb }
-    get isGif()      { return this._isGif }
-    get frameCount() { return this._renderedFrames?.length ?? 0 }
+    setColor(color)   { this.color = color }
+    setAutoColor()    { this.color = this.AUTO_COLOR }
+    setScale(scale)   { this.scale = Math.pow(2, Math.max(1, Math.min(scale, 6)) - 1) }
+    setBackground(b)  { this.background = b }
+    showOnElytra(v)   { this.elytraImage = v }
+    onFrameUpdate(cb) { this._onFrameUpdate = cb }
+    get isGif()       { return this._isGif }
+    get frameCount()  { return this._renderedFrames?.length ?? 0 }
 
     setImage(src) {
         this._stopGifAnimation()
-        this._imageSrc   = null
-        this._gifDataUrl = null
-        this._isGif      = false
+        this._imageSrc = null
+        this._gifBytes = null
+        this._isGif    = false
         this._renderedFrames = []
 
         if (src?.startsWith('data:image/gif')) {
-            this._isGif      = true
-            this._gifDataUrl = src
+            this._isGif = true
+            const b64    = src.split(',')[1]
+            const bin    = atob(b64)
+            const bytes  = new Uint8Array(bin.length)
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+            this._gifBytes = bytes
         } else {
             this._imageSrc = src
         }
@@ -58,8 +62,8 @@ class MinecraftCapeCreator {
     buildCape() {
         this._stopGifAnimation()
 
-        if (this._isGif && this._gifDataUrl) {
-            return this._decodeGifWithGifler(this._gifDataUrl)
+        if (this._isGif && this._gifBytes) {
+            return this._decodeGif(this._gifBytes)
                 .then(frames => this._renderAllGifFrames(frames))
                 .then(() => {
                     this._gifFrameIndex = 0
@@ -75,66 +79,98 @@ class MinecraftCapeCreator {
         })
     }
 
-    // ─── GIF decode via gifler ────────────────────────────────────────────────
-    // gifler feeds each fully-composited frame into a <canvas> using the
-    // browser's own GIF renderer — no manual disposal handling needed.
+    // ─── GIF decode via omggif ────────────────────────────────────────────────
+    // Usa GifReader.decodeAndBlitFrameRGBA com tamanho total do canvas,
+    // mas extrai apenas o patch do frame usando offsets calculados manualmente,
+    // e compõe num canvas persistente aplicando as disposal rules corretamente.
 
-    _decodeGifWithGifler(dataUrl) {
+    _decodeGif(bytes) {
         return new Promise((resolve, reject) => {
-            if (typeof gifler === 'undefined') {
-                reject(new Error('gifler not loaded')); return
-            }
+            try {
+                const gr     = new GifReader(bytes)
+                const W      = gr.width
+                const H      = gr.height
+                const nFrames = gr.numFrames()
+                const frames  = []
 
-            const frames  = []
-            let   stopped = false
+                const comp    = document.createElement('canvas')
+                comp.width    = W
+                comp.height   = H
+                const compCtx = comp.getContext('2d')
 
-            // gifler needs a URL; we pass the data URL directly
-            const anim = gifler(dataUrl)
+                const buf = new Uint8ClampedArray(W * H * 4)
 
-            anim.frames(
-                // gifler calls this once with the canvas it manages
-                (canvas, ctx) => {
-                    // no-op setup
-                },
-                // gifler calls this per frame with (ctx, delay)
-                (ctx, frameDelay) => {
-                    if (stopped) return
+                let prevRestoreData = null
 
+                for (let f = 0; f < nFrames; f++) {
+                    const fi  = gr.frameInfo(f)
+                    const fx  = fi.x
+                    const fy  = fi.y
+                    const fw  = fi.width
+                    const fh  = fi.height
+                    const dis = fi.disposal ?? 0
+
+                    // ── 1. Apply disposal of PREVIOUS frame ─────────────────────
+                    if (f > 0) {
+                        const pf = frames[f - 1]
+                        if (pf.disposal === 2) {
+                            compCtx.clearRect(pf.fx, pf.fy, pf.fw, pf.fh)
+                        } else if (pf.disposal === 3 && prevRestoreData) {
+                            compCtx.putImageData(prevRestoreData, 0, 0)
+                        }
+                    }
+
+                    // ── 2. Save snapshot BEFORE drawing (for disposal=3) ────────
+                    if (dis === 3) {
+                        prevRestoreData = compCtx.getImageData(0, 0, W, H)
+                    }
+
+                    // ── 3. Decode pixels into full-canvas buffer ─────────────────
+                    buf.fill(0)
+                    gr.decodeAndBlitFrameRGBA(f, buf)
+
+                    // ── 4. Extract patch pixels from buffer ──────────────────────
+                    const patch = new Uint8ClampedArray(fw * fh * 4)
+                    for (let row = 0; row < fh; row++) {
+                        const srcOff = ((fy + row) * W + fx) * 4
+                        const dstOff = row * fw * 4
+                        patch.set(buf.subarray(srcOff, srcOff + fw * 4), dstOff)
+                    }
+
+                    // ── 5. Merge patch into composite (skip transparent pixels) ──
+                    const existingData = compCtx.getImageData(fx, fy, fw, fh)
+                    for (let i = 0; i < patch.length; i += 4) {
+                        if (patch[i + 3] > 0) {
+                            existingData.data[i]     = patch[i]
+                            existingData.data[i + 1] = patch[i + 1]
+                            existingData.data[i + 2] = patch[i + 2]
+                            existingData.data[i + 3] = patch[i + 3]
+                        }
+                    }
+                    compCtx.putImageData(existingData, fx, fy)
+
+                    // ── 6. Snapshot full composite for this frame ────────────────
                     const snap = document.createElement('canvas')
-                    snap.width  = ctx.canvas.width
-                    snap.height = ctx.canvas.height
-                    snap.getContext('2d').drawImage(ctx.canvas, 0, 0)
+                    snap.width  = W
+                    snap.height = H
+                    snap.getContext('2d').drawImage(comp, 0, 0)
 
-                    frames.push({ canvas: snap, delay: frameDelay })
-                },
-                true  // loopDelay — pass true to get all frames then stop
-            )
-
-            // gifler doesn't have an "on done" callback in all versions,
-            // so we poll until frames stop arriving for 300 ms
-            let lastCount = 0
-            const check = setInterval(() => {
-                if (frames.length > 0 && frames.length === lastCount) {
-                    clearInterval(check)
-                    stopped = true
-                    resolve(frames)
+                    frames.push({
+                        canvas:   snap,
+                        delay:    Math.max((fi.delay || 10) * 10, 20),
+                        fx, fy, fw, fh,
+                        disposal: dis
+                    })
                 }
-                lastCount = frames.length
-            }, 300)
 
-            // Safety timeout
-            setTimeout(() => {
-                if (!stopped) {
-                    clearInterval(check)
-                    stopped = true
-                    if (frames.length > 0) resolve(frames)
-                    else reject(new Error('gifler timed out'))
-                }
-            }, 15000)
+                resolve(frames)
+            } catch (e) {
+                reject(e)
+            }
         })
     }
 
-    // ─── Render every decoded frame into a cape PNG ───────────────────────────
+    // ─── Render frames → capes ────────────────────────────────────────────────
 
     async _renderAllGifFrames(frames) {
         this._renderedFrames = []
@@ -148,7 +184,6 @@ class MinecraftCapeCreator {
 
     _startGifAnimation() {
         if (this._renderedFrames.length <= 1) return
-
         const tick = () => {
             const frame = this._renderedFrames[this._gifFrameIndex]
             if (this._onFrameUpdate && frame) this._onFrameUpdate(frame.dataUrl)
@@ -156,7 +191,6 @@ class MinecraftCapeCreator {
             const next = this._renderedFrames[this._gifFrameIndex]
             this._gifAnimTimer = setTimeout(tick, next?.delay ?? 100)
         }
-
         this._gifAnimTimer = setTimeout(tick, this._renderedFrames[0]?.delay ?? 100)
     }
 
@@ -164,16 +198,16 @@ class MinecraftCapeCreator {
         if (this._gifAnimTimer) { clearTimeout(this._gifAnimTimer); this._gifAnimTimer = null }
     }
 
-    // ─── Core cape render — fresh canvas per call ─────────────────────────────
+    // ─── Core cape render — canvas novo por frame ─────────────────────────────
 
     _buildStaticCape(imageSrc) {
         return new Promise(async (resolve, reject) => {
             try {
                 const s = this.scale
 
-                const offscreen = document.createElement('canvas')
-                offscreen.width  = 64 * s
-                offscreen.height = 32 * s
+                const offscreen    = document.createElement('canvas')
+                offscreen.width    = 64 * s
+                offscreen.height   = 32 * s
                 const ctx = offscreen.getContext('2d', { willReadFrequently: true })
 
                 const avgColor = (imgData) => {
@@ -190,7 +224,7 @@ class MinecraftCapeCreator {
                     if (src instanceof HTMLCanvasElement) { res(src); return }
                     const img = new Image()
                     img.crossOrigin = 'anonymous'
-                    img.onload = () => res(img)
+                    img.onload  = () => res(img)
                     img.onerror = rej
                     img.src = src
                 })
@@ -230,7 +264,6 @@ class MinecraftCapeCreator {
                     }
                 }
 
-                // Mirror to shared canvas for downloadCape()
                 this.canvas.width  = offscreen.width
                 this.canvas.height = offscreen.height
                 this.context.drawImage(offscreen, 0, 0)
@@ -251,14 +284,13 @@ class MinecraftCapeCreator {
         link.click()
     }
 
-    // ─── Export: Animated GIF via gif.js ──────────────────────────────────────
+    // ─── Export: GIF ──────────────────────────────────────────────────────────
 
     exportGif(name = 'Cape') {
         return new Promise((resolve, reject) => {
             if (!this._renderedFrames?.length) { reject(new Error('No frames')); return }
             if (typeof GIF === 'undefined')    { reject(new Error('gif.js not loaded')); return }
 
-            // allorigins proxy to bypass CORS on the gif.js worker script
             const workerSrc = 'https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js'
             const workerUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(workerSrc)}`
 
@@ -288,7 +320,7 @@ class MinecraftCapeCreator {
                     gif.addFrame(canvas, { delay: this._renderedFrames[i].delay, copy: true })
                 })
                 gif.on('finished', blob => {
-                    const url = URL.createObjectURL(blob)
+                    const url  = URL.createObjectURL(blob)
                     const link = document.createElement('a')
                     link.href = url; link.download = `${name}.gif`; link.click()
                     setTimeout(() => URL.revokeObjectURL(url), 5000)
@@ -300,7 +332,7 @@ class MinecraftCapeCreator {
         })
     }
 
-    // ─── Export: ZIP of PNG frames ────────────────────────────────────────────
+    // ─── Export: ZIP ──────────────────────────────────────────────────────────
 
     exportFramesZip(name = 'Cape') {
         return new Promise((resolve, reject) => {

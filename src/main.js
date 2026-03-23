@@ -100,14 +100,13 @@ class MinecraftCapeCreator {
     _decodeGif(arrayBuffer) {
         return new Promise((resolve, reject) => {
             try {
-                // omggif exposes GifReader globally
                 const gr = new GifReader(new Uint8Array(arrayBuffer))
                 const info = { width: gr.width, height: gr.height }
                 const frames = []
 
-                // Rolling composite canvas for correct disposal rendering
+                // Persistent composite canvas — never fully cleared between frames
                 const comp = document.createElement('canvas')
-                comp.width = info.width
+                comp.width  = info.width
                 comp.height = info.height
                 const compCtx = comp.getContext('2d')
 
@@ -115,39 +114,58 @@ class MinecraftCapeCreator {
 
                 for (let i = 0; i < gr.numFrames(); i++) {
                     const fi = gr.frameInfo(i)
+                    const px = fi.x      || 0
+                    const py = fi.y      || 0
+                    const pw = fi.width
+                    const ph = fi.height
 
-                    // Disposal of *previous* frame before drawing current
+                    // ── Disposal of the PREVIOUS frame ──────────────────────
                     if (i > 0) {
                         const prev = frames[i - 1]
                         if (prev.disposal === 2) {
-                            compCtx.clearRect(prev.x, prev.y, prev.fw, prev.fh)
+                            // Restore to background colour (transparent)
+                            compCtx.clearRect(prev.x, prev.y, prev.pw, prev.ph)
                         } else if (prev.disposal === 3 && prevSnapshot) {
+                            // Restore to what was there before previous frame
                             compCtx.putImageData(prevSnapshot, 0, 0)
                         }
+                        // disposal 0 or 1 → leave composite as-is (do nothing)
                     }
 
+                    // Save snapshot BEFORE drawing current frame (needed if disposal=3)
                     if (fi.disposal === 3) {
                         prevSnapshot = compCtx.getImageData(0, 0, info.width, info.height)
                     }
 
-                    // Decode RGBA pixels for this frame (full canvas size)
-                    const pixels = new Uint8ClampedArray(info.width * info.height * 4)
-                    gr.decodeAndBlitFrameRGBA(i, pixels)
-                    compCtx.putImageData(new ImageData(pixels, info.width, info.height), 0, 0)
+                    // ── Decode only the patch pixels (pw × ph) ──────────────
+                    // decodeAndBlitFrameRGBA always writes into a full-canvas-sized
+                    // buffer, but only the patch region (x,y,w,h) has real data.
+                    // We extract just that rectangle and putImageData with offset
+                    // so the rest of the composite is untouched.
+                    const fullPixels = new Uint8ClampedArray(info.width * info.height * 4)
+                    gr.decodeAndBlitFrameRGBA(i, fullPixels)
 
-                    // Snapshot composite into its own canvas
+                    // Extract patch rows from the full buffer
+                    const patchPixels = new Uint8ClampedArray(pw * ph * 4)
+                    for (let row = 0; row < ph; row++) {
+                        const srcOffset  = ((py + row) * info.width + px) * 4
+                        const destOffset = row * pw * 4
+                        patchPixels.set(fullPixels.subarray(srcOffset, srcOffset + pw * 4), destOffset)
+                    }
+
+                    // Blit patch at its correct offset — leaves everything else intact
+                    compCtx.putImageData(new ImageData(patchPixels, pw, ph), px, py)
+
+                    // ── Snapshot the fully composited frame ──────────────────
                     const snap = document.createElement('canvas')
-                    snap.width = info.width
+                    snap.width  = info.width
                     snap.height = info.height
                     snap.getContext('2d').drawImage(comp, 0, 0)
 
                     frames.push({
-                        canvas: snap,
-                        delay: (fi.delay || 10) * 10,   // centiseconds → ms
-                        x: fi.x || 0,
-                        y: fi.y || 0,
-                        fw: fi.width,
-                        fh: fi.height,
+                        canvas:   snap,
+                        delay:    (fi.delay || 10) * 10,
+                        x: px, y: py, pw, ph,
                         disposal: fi.disposal || 0
                     })
                 }
